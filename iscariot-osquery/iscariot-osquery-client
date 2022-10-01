@@ -1,0 +1,162 @@
+#!/bin/bash
+
+# set -x
+
+EXECTYPES="Execute-Shell Execute-Direct BOF Assembly"
+HOSTS=""
+CURRENT_HOST=""
+
+printHelp() {
+    echo "Available assemblies: Certify, KrbRelayUp, nopowershell, Rubeus, Seatbelt, Sharp-SMBExec, SharPersist, SharpHound, SharpHound3, SharpMapExec, SharpSecDump, SharpUp, SharpWMI"
+    echo "! BOF Arguments are not currently supported !"
+    echo "Available BOFs: adcs_enum, adcs_enum_com, adcs_enum_com2, adv_audit_policies, arp, cacls, dir, driversigs, enum_filter_driver, enumlocalsessions, env, findLoadedModule, get-netsession, get_password_policy, ipconfig, ldapsearch, listdns, listmods, netgroup, netlocalgroup, netshares, netstat, netuse, netuser, netuserenum, netview, nonpagedldapsearch, nslookup, reg_query, resources, routeprint, sc_enum, sc_qc, sc_qdescription, sc_qfailure, sc_qtriggerinfo, sc_query, schtasksenum, schtasksquery, tasklist, uptime, vssenum, whoami, windowlist, wmi_query"
+}
+
+checkPrereqs() {    
+    if [[ ! -f gum ]]; then
+        curl -s -L https://github.com/charmbracelet/gum/releases/download/v0.6.0/gum_0.6.0_linux_x86_64.tar.gz > gum_0.6.0_linux_x86_64.tar.gz
+        tar -xf gum_0.6.0_linux_x86_64.tar.gz gum
+        rm gum_0.6.0_linux_x86_64.tar.gz
+    fi
+    if [[ ! -f jq ]]; then
+        curl -s -L https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 > jq
+        chmod +x jq
+    fi
+    if ! command -v fleetctl &> /dev/null; then
+        ./gum style \
+        --foreground 212 --border-foreground 212 --border double \
+        --align center --width 50 --margin "1 2" --padding "2 4" \
+        'fleetctl is required to use this client helper'
+    fi
+
+}
+
+getHosts() {
+    echo
+    ./gum style --foreground 212 --align left 'Getting Hosts...'
+    echo
+    HOSTS=$(fleetctl get hosts --json | jq -r '.spec.hostname')
+    fleetctl get hosts
+    echo
+}
+
+getCurrentHost() {
+    echo "Choose the host to operate on"
+    CURRENT_HOST=$(echo $HOSTS | ./gum choose --limit 1)
+}
+
+getCurrentExecType() {
+    echo "Choose the type of execution"
+    CURRENT_EXEC=$(./gum choose --limit 1 $EXECTYPES)
+}
+
+doShellExecute() {
+    OUTPUT=$(fleetctl query --hosts "$CURRENT_HOST" --query "SELECT * FROM iscariotExecute WHERE use_shell='1' AND cmd='$COMMAND_ESCAPED'")
+    COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.rows[].stdout')
+    if  [[ -z "$COMMAND_OUTPUT" ]]; then
+        COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.rows[].stderr')
+    fi
+    if  [[ -z "$COMMAND_OUTPUT" ]]; then
+        COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.error')
+    fi
+}
+
+doDirectExecute() {
+    echo "Executing command $COMMAND_ESCAPED on $CURRENT_HOST"
+    OUTPUT=$(fleetctl query --hosts "$CURRENT_HOST" --query "SELECT * FROM iscariotExecute WHERE use_shell='0' AND cmd='$COMMAND_ESCAPED'")
+    COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.rows[].stdout')
+    if  [[ -z "$COMMAND_OUTPUT" ]]; then
+        COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.rows[].stderr')
+    fi
+    if  [[ -z "$COMMAND_OUTPUT" ]]; then
+        COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.error')
+    fi
+}
+
+doBOF() {
+    OUTPUT=$(fleetctl query --hosts "$CURRENT_HOST" --query "SELECT * FROM iscariotBOF WHERE bof='$COMMAND_ESCAPED'")
+    COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.rows[].output')
+    if  [[ -z "$COMMAND_OUTPUT" ]]; then
+        COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.error')
+    fi
+}
+
+doExecuteAssembly() {
+    COMMAND_ARRAY=(${COMMAND_ESCAPED// / })
+    ASSEMBLY=${COMMAND_ARRAY[0]}
+    ARGS=${COMMAND_ARRAY[@]:1}
+    OUTPUT=$(fleetctl query --hosts "$CURRENT_HOST" --query "SELECT * FROM iscariotExecuteAssembly WHERE assembly='$ASSEMBLY' AND args='$ARGS'")
+    COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.rows[].output')
+    if  [[ -z "$COMMAND_OUTPUT" ]]; then
+        COMMAND_OUTPUT=$(echo "$OUTPUT" | jq -r '.error')
+    fi
+}
+
+prompt() {
+    while :; do
+        # Set the prompt
+        PROMPT_HOST=$(./gum style --foreground 9 --background 0 " $CURRENT_HOST ")
+        if [[ "$CURRENT_EXEC" == "Execute-Shell" ]]; then
+            PROMPT_TYPE=$(./gum style --foreground 99 --background 0 "(shell)>")
+            read -e -p "${PROMPT_HOST}${PROMPT_TYPE} " COMMAND
+        elif [[ "$CURRENT_EXEC" == "Execute-Direct" ]]; then
+            PROMPT_TYPE=$(./gum style --foreground 99 --background 0 "(direct)>")
+            read -e -p "${PROMPT_HOST}${PROMPT_TYPE} " COMMAND
+        elif [[ "$CURRENT_EXEC" == "BOF" ]]; then
+            PROMPT_TYPE=$(./gum style --foreground 99 --background 0 "(BOF)>")
+            read -e -p "${PROMPT_HOST}${PROMPT_TYPE} " COMMAND
+        elif [[ "$CURRENT_EXEC" == "Assembly" ]]; then
+            PROMPT_TYPE=$(./gum style --foreground 99 --background 0 "(assembly)>")
+            read -e -p "${PROMPT_HOST}${PROMPT_TYPE} " COMMAND
+        fi
+
+        # Check the command
+        if [[ "$COMMAND" = "back" ]]; then
+            break
+        fi
+        if [[ "$COMMAND" = "exit" ]]; then
+            exit
+        fi
+        if [[ "$COMMAND" = "?" ||  "$COMMAND" = "help"  ]]; then
+            printHelp
+            continue
+        fi
+        #printf -v COMMAND_ESCAPED "%q" "$COMMAND"
+        COMMAND_ESCAPED=${COMMAND//\"/\\\"}
+
+        # Execute the command in the correct way
+        if [[ "$CURRENT_EXEC" == "Execute-Shell" ]]; then
+            doShellExecute
+        elif [[ "$CURRENT_EXEC" == "Execute-Direct" ]]; then
+            doDirectExecute
+        elif [[ "$CURRENT_EXEC" == "BOF" ]]; then
+            doBOF
+        elif [[ "$CURRENT_EXEC" == "Assembly" ]]; then
+            doExecuteAssembly
+        fi
+
+        echo
+        COMMAND_OUTPUT_FORMATTED=$(echo "$COMMAND_OUTPUT" | sed 's/\t/    /g')
+        
+        # If the command output is longer than 119 chars, set the max with to 120 and wrap
+        if [[ $(echo "$COMMAND_OUTPUT_FORMATTED" | wc -L) -gt 119 ]]; then
+            GUM_WIDTH="--width 120"
+        else
+            GUM_WIDTH=""
+        fi
+        ./gum style $GUM_WIDTH --border rounded --margin "1 1" --padding "1 1" --foreground "#33FF00" --background "#282828" "$COMMAND_OUTPUT_FORMATTED"
+        echo 
+    done
+}
+
+main() {
+    checkPrereqs
+    getHosts
+    while :; do 
+        getCurrentHost
+        getCurrentExecType
+        prompt
+    done
+}
+
+main
